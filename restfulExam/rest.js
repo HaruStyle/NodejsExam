@@ -158,10 +158,106 @@ app.get('/user/:id',function(req,res){
 			}
 		});
 });
-app.post('/user',function(req,res){
+
+// ranking 정보 조회///////////////////////
+
+app.get('/rank',function(req,res) {
+	connection.query('select seq,(select count(*)+1 from ranking where gcnt > t.gcnt) as rank,'+
+	'ramen,water,rice,bread,gcnt,recnt '+
+	'from ranking as t order by rank limit 0 ,100;', 
+		function(err,results,fields) {
+			if (err) {
+				res.send(JSON.stringify(err));
+			} else {
+				res.send(JSON.stringify(results));
+			}
+		});
+});
+
+app.get('/rank/:seq',function(req,res){
+	connection.query('select seq, ramen,water,rice,bread,gcnt,(select count(*) from reply where ori_seq =?) as recnt '+
+	'from ranking where seq = ?', 
+	    [ req.params.seq ,req.params.seq ],
+		function(err, result,fields) {
+			if (err) {
+				res.send(JSON.stringify(err));
+			} else {
+				res.send(JSON.stringify(result));
+			}
+		})
+});
+
+app.get('/rank/reply/:seq',function(req,res){
+	connection.query('select seq,contxt, DATE_FORMAT(create_at,"%Y-%m-%d") as ins_date '+
+	'from reply where ori_seq = ? order by seq desc', 
+	    [ req.params.seq ],
+		function(err, result,fields) {
+			if (err) {
+				res.send(JSON.stringify(err));
+			} else {
+				res.send(JSON.stringify(result));
+			}
+		})
+});
+app.get('/kind/:kind',function(req,res){
+	connection.query('select seq,kind, kind_no,name ,detail, price '+
+	'from kinds where kind = ? order by kind_no', 
+	    [ req.params.kind ],
+		function(err, result,fields) {
+			if (err) {
+				res.send(JSON.stringify(err));
+			} else {
+				res.send(JSON.stringify(result));
+			}
+		})
+});
+// 댓글 등록
+app.post('/rank/save/',function(req,res){
+	console.log(req.body.ori_seq+";"+req.body.contxt);
+
+	connection.query('insert into reply(ori_seq,seq, contxt)' +
+	' (select ?, (select ifnull(max(seq)+1,1) from reply where ori_seq = ?), ? from dual)',
+	[ req.body.ori_seq, req.body.ori_seq, req.body.contxt ],
+	function(err,result){
+	   if (err) {
+		  res.send(JSON.stringify(err));
+	   } else
+	   {		   
+		//  res.send(JSON.stringify(result));
+		connection.query('update ranking set recnt=(select count(*) from reply where ori_seq = ?) where seq=?',
+		[ req.body.ori_seq, req.body.ori_seq ],
+		function(err,result){
+		   if (err) {
+			  res.send(JSON.stringify(err));
+		   } else
+		   {
+			  res.send(JSON.stringify(result));
+		   }
+		});  
+	   }
+	});  
+});
+// 선택 등록
+app.post('/savechoice/',function(req,res){
+	console.log(req.body.r, req.body.w, req.body.c, req.body.b);
+
+	connection.query('insert into ranking(ramen,water,rice,bread,gcnt,recnt ) values(?,?,?,?,?,?)',
+	[ req.body.r, req.body.w, req.body.c, req.body.b, 0 ,0 ],
+	function(err,result){
+	   if (err) {
+		  res.send(JSON.stringify(err));
+	   } else
+	   {
+		  res.send(JSON.stringify(result));
+	   }
+	});  
+});
+//추천ADD
+app.put('/goodadd/:ori_seq',function(req,res){
+	console.log(req.params.ori_seq);
 	connection.query(
-		'insert into user(name,age) values(?,?)',
-		[ req.body.name, req.body.age ], 
+		'update ranking set gcnt=gcnt+1 where seq=?',
+		[ req.params.ori_seq ],
 		function(err, result) {
 			if (err) {
 				res.send(JSON.stringify(err));
@@ -169,6 +265,85 @@ app.post('/user',function(req,res){
 				res.send(JSON.stringify(result));
 			}
 		})
+});
+/////////////////////////////////////
+
+var crypto = require('crypto');
+app.post('/user',function(req,res){
+	console.log(req.body.user_id+";"+req.body.password);
+	var password = req.body.password;
+	var hash = crypto.createHash('sha256').
+		update(password).digest('base64');
+	connection.query(
+		'insert into user(user_id,password,name,age) values(?,?,?,?)',
+		[ req.body.user_id, hash, req.body.name, req.body.age ], 
+		function(err, result) {
+			if (err) {
+				res.send(JSON.stringify(err));
+			} else {
+				res.send(JSON.stringify(result));
+			}
+		})
+});
+var jwt = require('json-web-token');
+app.post('/user/login',function(req,res){
+	var password = req.body.password;
+	var hash = crypto.createHash('sha256').
+		update(password).digest('base64');
+	connection.query(
+		'select id from user where user_id=? and password=?',
+		[ req.body.user_id, hash ], function(err, results, fields){
+			if (err) {
+				res.send(JSON.stringify(err));
+			} else {
+				if (results.length > 0) {//조건만족 -> 로그인 성공
+					var cur_date = new Date();
+					var settingAddHeaders = {
+						payload: {
+							"iss":"shinhan",
+							"aud":"mobile",
+							"iat":cur_date.getTime(),
+							"typ":"/online/transactionstatus/v2",
+							"request":{
+								"myTransactionId":req.body.user_id,
+								"merchantTransactionId":hash,
+								"status":"SUCCESS"
+							}
+						},
+						header:{
+							kid:'abcdefghijklmnopqrstuvwxyz1234567890'
+						}
+					};
+					var secret = "SHINHANMOBILETOPSECRET!!!!!!!!";
+					//고유한 토큰 생성
+					jwt.encode(secret, settingAddHeaders, 
+						function(err, token) {
+							if (err) {
+								res.send(JSON.stringify(err));
+							} else {
+								var tokens = token.split(".");
+								connection.query(
+									'insert into user_login('+
+									'token,user_real_id) values(?,?)',
+									[tokens[2], results[0].id],
+									function(err, result) {
+										if (err) {
+											res.send(JSON.stringify(err));
+										} else {
+											res.send(JSON.stringify({
+												result:true,
+												token:tokens[2],
+												db_result:result
+											}));
+										}
+									});
+							}
+						});
+				} else {//조건불만족 -> 로그인 실패
+					res.send(JSON.stringify({result:false}));
+				}
+			}
+		});
 });
 app.put('/user/:id',function(req,res){
 	connection.query(
@@ -192,6 +367,15 @@ app.delete('/user/:id',function(req,res){
 			}
 		});
 });
+
+
+
+
+
+
+
+
+
 app.listen(52273,function() {
 	console.log('Server running');
 });
